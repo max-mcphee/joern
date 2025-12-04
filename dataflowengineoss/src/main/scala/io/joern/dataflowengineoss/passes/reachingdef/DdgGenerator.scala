@@ -178,8 +178,12 @@ class DdgGenerator(semantics: Semantics) {
           addEdge(src, dst, nodeToEdgeLabel(src))
         }
       method.parameter.foreach { param =>
-        param.capturedByMethodRef.referencedMethod.ast.isIdentifier.foreach { identifier =>
-          addEdge(param, identifier, nodeToEdgeLabel(param))
+        param.capturedByMethodRef.foreach { methodRef =>
+          scala.util.Try(methodRef.referencedMethod).foreach { method =>
+            method.ast.isIdentifier.foreach { identifier =>
+              addEdge(param, identifier, nodeToEdgeLabel(param))
+            }
+          }
         }
       }
 
