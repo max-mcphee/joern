@@ -11,8 +11,6 @@ class SwiftCompilerFullnameTests extends SwiftCompilerSrc2CpgSuite {
 
     "be correct in a simple Hello World example" in {
       val cpg = codeWithSwiftSetup("""
-          |import Foundation
-          |
           |class Main {
           |  func hello() {
           |    print("Hello World!")
@@ -47,15 +45,13 @@ class SwiftCompilerFullnameTests extends SwiftCompilerSrc2CpgSuite {
 
     "be correct for variable declarations" in {
       val cpg = codeWithSwiftSetup("""
-          |import Foundation
-          |
           |let a = 1
           |let b = "b"
           |var c = 0.1
           |let d = 2, e = 3
           |let f: Int, g: Float
           |""".stripMargin)
-      val List(a, b, c, d, e, f, g) = cpg.file(".+main.swift").ast.isLocal.sortBy(_.name).l
+      val Seq(a, b, c, d, e, f, g) = cpg.file(".+main.swift").ast.isLocal.sortBy(_.name)
       a.typeFullName shouldBe "Swift.Int"
       b.typeFullName shouldBe "Swift.String"
       c.typeFullName shouldBe "Swift.Double"
@@ -64,7 +60,7 @@ class SwiftCompilerFullnameTests extends SwiftCompilerSrc2CpgSuite {
       f.typeFullName shouldBe "Swift.Int"
       g.typeFullName shouldBe "Swift.Float"
 
-      val List(aId, bId, cId, dId, eId) = cpg.file(".+main.swift").ast.isIdentifier.sortBy(_.name).l
+      val Seq(aId, bId, cId, dId, eId) = cpg.file(".+main.swift").ast.isIdentifier.sortBy(_.name)
       aId.typeFullName shouldBe "Swift.Int"
       bId.typeFullName shouldBe "Swift.String"
       cId.typeFullName shouldBe "Swift.Double"

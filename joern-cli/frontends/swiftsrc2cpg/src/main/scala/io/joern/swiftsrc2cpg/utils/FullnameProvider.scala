@@ -11,24 +11,24 @@ import scala.annotation.tailrec
   */
 private object FullnameProvider {
 
-  /** Represents the kind of fullname to retrieve.
-    *   - Type - For retrieving type fullnames
-    *   - Decl - For retrieving declaration fullnames
+  /** Represents the kind of fullName to retrieve.
+    *   - Type - For retrieving type fullNames
+    *   - Decl - For retrieving declaration fullNames
     */
   private enum Kind {
     case Type, Decl
   }
 
-  // TODO: provide the actual mapping from SwiftNode.toString (nodeKind) to ResolvedTypeInfo.nodeKind
+  // TODO: provide the actual mapping from SwiftNode.toString (nodeKind) to ResolvedTypeInfo.nodeKind priority list
   private val NodeKindMapping = Map(
-    "DeclReferenceExprSyntax" -> "type_expr",
-    "VariableDeclSyntax"      -> "var_decl",
-    "PatternBindingSyntax"    -> "var_decl",
-    "IdentifierPatternSyntax" -> "var_decl"
+    "DeclReferenceExprSyntax" -> List("type_expr", "member_ref_expr"),
+    "VariableDeclSyntax"      -> List("var_decl"),
+    "PatternBindingSyntax"    -> List("var_decl"),
+    "IdentifierPatternSyntax" -> List("var_decl")
   )
 }
 
-/** Provides functionality to resolve and retrieve fullnames for Swift types and declarations. Uses a type mapping to
+/** Provides functionality to resolve and retrieve fullNames for Swift types and declarations. Uses a type mapping to
   * resolve Swift node references to their fully qualified names.
   *
   * @param typeMap
@@ -48,20 +48,23 @@ class FullnameProvider(typeMap: SwiftFileLocalTypeMapping) {
   private def filterForNodeKind(in: Set[ResolvedTypeInfo], nodeKind: String): Option[ResolvedTypeInfo] = {
     if (in.isEmpty) return None
     if (in.size == 1) return in.headOption
-    NodeKindMapping.get(nodeKind).flatMap(mappedNodeKind => in.find(_.nodeKind == mappedNodeKind)).orElse(in.headOption)
+    NodeKindMapping
+      .get(nodeKind)
+      .flatMap(mappedNodeKinds => mappedNodeKinds.flatMap(kind => in.find(_.nodeKind == kind)).headOption)
+      .orElse(in.headOption)
   }
 
-  /** Recursively attempts to find the fullname for a given source range and kind. If the exact range is not found, it
+  /** Recursively attempts to find the fullName for a given source range and kind. If the exact range is not found, it
     * narrows the range down to a single point (the Swift compiler may generate synthetic node for them).
     *
     * @param range
     *   The source position range (start offset, end offset)
     * @param kind
-    *   The kind of fullname to retrieve (Type or Decl)
+    *   The kind of fullName to retrieve (Type or Decl)
     * @param nodeKind
     *   The kind of Swift node
     * @return
-    *   An optional String containing the fullname if found
+    *   An optional String containing the fullName if found
     */
   @tailrec
   private def fullName(
@@ -87,14 +90,14 @@ class FullnameProvider(typeMap: SwiftFileLocalTypeMapping) {
     }
   }
 
-  /** Retrieves the type fullname for a given source range and node kind.
+  /** Retrieves the type fullName for a given source range and node kind.
     *
     * @param range
     *   The source position range (start offset, end offset)
     * @param nodeKind
     *   The kind of Swift node
     * @return
-    *   An optional String containing the type fullname if found
+    *   An optional String containing the type fullName if found
     */
   protected def typeFullname(range: (Int, Int), nodeKind: String): Option[String] = {
     fullName(range, FullnameProvider.Kind.Type, nodeKind).map(AstCreatorHelper.cleanType)
@@ -106,26 +109,26 @@ class FullnameProvider(typeMap: SwiftFileLocalTypeMapping) {
     fullName(range, FullnameProvider.Kind.Type, nodeKind).map(AstCreatorHelper.cleanName)
   }
 
-  /** Retrieves the declaration fullname for a given source range and node kind.
+  /** Retrieves the declaration fullName for a given source range and node kind.
     *
     * @param range
     *   The source position range (start offset, end offset)
     * @param nodeKind
     *   The kind of Swift node
     * @return
-    *   An optional String containing the declaration fullname if found
+    *   An optional String containing the declaration fullName if found
     */
   protected def declFullname(range: (Int, Int), nodeKind: String): Option[String] = {
-    fullName(range, FullnameProvider.Kind.Decl, nodeKind).map(AstCreatorHelper.cleanName)
+    fullName(range, FullnameProvider.Kind.Decl, nodeKind)
   }
 
-  /** Retrieves the type fullname for a given Swift node. Extracts the start and end offsets from the node if available.
+  /** Retrieves the type fullName for a given Swift node. Extracts the start and end offsets from the node if available.
     * Returns None if typeMap is empty.
     *
     * @param node
-    *   The Swift node to get the type fullname for
+    *   The Swift node to get the type fullName for
     * @return
-    *   An optional String containing the type fullname if found
+    *   An optional String containing the type fullName if found
     */
   def typeFullname(node: SwiftNode): Option[String] = {
     if (typeMap.isEmpty) return None
@@ -145,19 +148,48 @@ class FullnameProvider(typeMap: SwiftFileLocalTypeMapping) {
     }
   }
 
-  /** Retrieves the declaration fullname for a given Swift node. Extracts the start and end offsets from the node if
+  /** Retrieves the declaration fullName for a given Swift node. Extracts the start and end offsets from the node if
     * available. Returns None if typeMap is empty.
     *
     * @param node
-    *   The Swift node to get the declaration fullname for
+    *   The Swift node to get the declaration fullName for
     * @return
-    *   An optional String containing the declaration fullname if found
+    *   An optional String containing the declaration fullName if found
     */
   def declFullname(node: SwiftNode): Option[String] = {
+    declFullnameRaw(node).map(_.replace("<extension>", ""))
+  }
+
+  /** Same as FullnameProvider.declFullname but does not strip the `<extension>` tag.
+    */
+  def declFullnameRaw(node: SwiftNode): Option[String] = {
     if (typeMap.isEmpty) return None
     (node.startOffset, node.endOffset) match {
       case (Some(start), Some(end)) => declFullname((start, end), node.toString)
       case _                        => None
+    }
+  }
+
+  /** Returns inheritance fullNames for the given Swift node.
+    *
+    * Looks up resolved type information in the `typeMap` using the node's start and end offsets. If no mapping is
+    * present or the node does not have offsets, an empty sequence is returned.
+    *
+    * @param node
+    *   the Swift AST node to query
+    * @return
+    *   a sequence of inheritance fullNames, or an empty sequence if none are found
+    */
+  def inheritsFor(node: SwiftNode): Seq[String] = {
+    if (typeMap.isEmpty) return Seq.empty
+    (node.startOffset, node.endOffset) match {
+      case (Some(start), Some(end)) =>
+        typeMap.get((start, end)) match {
+          case Some(typeInfos) =>
+            typeInfos.flatMap(_.inherits).toSeq
+          case None => Seq.empty
+        }
+      case _ => Seq.empty
     }
   }
 

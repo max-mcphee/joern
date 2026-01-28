@@ -61,7 +61,6 @@ trait AstForExpressionsCreator(implicit withSchemaValidation: ValidationMode) { 
     val name      = getCallName(call, nameAst)
     val arguments = call.args.map(astForCallArg)
 
-    val inStaticScope = scope.getEnclosingTypeDeclTypeFullName.exists(_.endsWith(Domain.MetaTypeDeclExtension))
     /*
      * A receiver only makes sense if one can track the receiver back to some sort of runtime type information. In the
      * case of a normal top-level call like foo() that is not possible. There is no corresponding foo identifier which
@@ -141,7 +140,14 @@ trait AstForExpressionsCreator(implicit withSchemaValidation: ValidationMode) { 
       case _                                             => getMfn(call, name)
     }
 
-    val callRoot = callNode(call, code, name, fullName, dispatchType, None, Some(Defines.Any))
+    val staticReceiver = call.target.collect {
+      case nameExpr: PhpNameExpr if nameExpr.name == NameConstants.Self =>
+        getTypeDeclPrefix
+      case nameExpr: PhpNameExpr =>
+        Option(s"${nameExpr.name}")
+    }.flatten
+
+    val callRoot = callNode(call, code, name, fullName, dispatchType, None, Some(Defines.Any), staticReceiver)
 
     callAst(callRoot, arguments)
   }
@@ -759,22 +765,24 @@ trait AstForExpressionsCreator(implicit withSchemaValidation: ValidationMode) { 
   }
 
   private def astForYieldExpr(expr: PhpYieldExpr): Ast = {
-    val maybeKey = expr.key.map(astForExpr)
-    val maybeVal = expr.value.map(astForExpr)
-
-    val code = (maybeKey, maybeVal) match {
+    val exprAst = (expr.key, expr.value) match {
       case (Some(key), Some(value)) =>
-        s"yield ${key.rootCodeOrEmpty} => ${value.rootCodeOrEmpty}"
-
+        Some(astForKeyValPair(expr, key, value))
+      case (_, Some(value)) =>
+        Some(astForExpr(value))
       case _ =>
-        s"yield ${maybeKey.map(_.rootCodeOrEmpty).getOrElse("")}${maybeVal.map(_.rootCodeOrEmpty).getOrElse("")}".trim
+        None
     }
 
-    val yieldNode = controlStructureNode(expr, ControlStructureTypes.YIELD, code)
+    val code = exprAst match {
+      case Some(ast) => s"yield ${ast.rootCodeOrEmpty}"
+      case _         => s"yield"
+    }
 
-    Ast(yieldNode)
-      .withChildren(maybeKey.toList)
-      .withChildren(maybeVal.toList)
+    val node = returnNode(expr, code)
+
+    Ast(node)
+      .withChildren(exprAst.toList)
   }
 
   private def astForClassConstFetchExpr(expr: PhpClassConstFetchExpr): Ast = {
@@ -863,7 +871,7 @@ trait AstForExpressionsCreator(implicit withSchemaValidation: ValidationMode) { 
     val initArgs      = expr.args.map(astForCallArg)
     val initFullName  = s"$className$MethodDelimiter$ConstructorMethodName"
     val initCode      = s"new $className(${initArgs.map(_.rootCodeOrEmpty).mkString(",")})"
-    val maybeTypeHint = scope.resolveIdentifier(className).map(_.name) // consider imported or defined types
+    val maybeTypeHint = scope.resolveClassIdentifier(className).map(_.name) // consider imported or defined types
     val initCallNode = callNode(
       expr,
       initCode,

@@ -53,7 +53,7 @@ trait AstCreatorHelper(disableFileContent: Boolean)(implicit withSchemaValidatio
   }
 
   protected def composeMethodFullName(methodName: String): String = {
-    scope.resolveIdentifier(methodName) match {
+    scope.resolveFunctionIdentifier(methodName) match {
       case Some(importedMethod)                                         => importedMethod.name
       case None if methodName == NamespaceTraversal.globalNamespaceName => globalNamespace.fullName
       case None =>
@@ -62,14 +62,12 @@ trait AstCreatorHelper(disableFileContent: Boolean)(implicit withSchemaValidatio
     }
   }
 
-  protected def composeMethodFullNameForCall(methodName: String, appendMetaTypeDeclExt: Boolean = false): String = {
-    scope.resolveIdentifier(methodName) match {
+  protected def composeMethodFullNameForCall(methodName: String): String = {
+    scope.resolveFunctionIdentifier(methodName) match {
       case Some(importedMethod)                                         => importedMethod.name
       case None if methodName == NamespaceTraversal.globalNamespaceName => globalNamespace.fullName
       case None =>
-        val className = Option
-          .when(appendMetaTypeDeclExt)(getTypeDeclPrefix.map(name => s"$name$MetaTypeDeclExtension").orNull)
-          .orElse(getTypeDeclPrefix)
+        val className = getTypeDeclPrefix
 
         val nameWithClass = List(className, Some(methodName)).flatten.mkString(MethodDelimiter)
         prependNamespacePrefix(nameWithClass)
@@ -83,7 +81,7 @@ trait AstCreatorHelper(disableFileContent: Boolean)(implicit withSchemaValidatio
     }
   }
 
-  private def getTypeDeclPrefix: Option[String] =
+  protected def getTypeDeclPrefix: Option[String] =
     scope.getEnclosingTypeDeclTypeName.filterNot(_ == NamespaceTraversal.globalNamespaceName)
 
   protected def codeForMethodCall(call: PhpCallExpr, targetAst: Ast, name: String): String = {
@@ -160,7 +158,8 @@ trait AstCreatorHelper(disableFileContent: Boolean)(implicit withSchemaValidatio
     expr: PhpNode,
     name: String,
     innerMethodsIterator: Iterator[MethodScope],
-    surroundingMethods: List[MethodScope]
+    surroundingMethods: List[MethodScope],
+    isInClosure: Boolean = false
   ): Unit = {
     surroundingMethods.foreach { currentMethod =>
       val innerMethodScope = innerMethodsIterator.next()
@@ -168,12 +167,14 @@ trait AstCreatorHelper(disableFileContent: Boolean)(implicit withSchemaValidatio
       val innerMethodRef   = innerMethodScope.methodRefNode
       innerMethodRef match {
         case Some(methodRef) =>
-          scope.getMethodRef(innerMethodNode.fullName) match {
-            case None =>
-              diffGraph.addNode(methodRef)
-              diffGraph.addEdge(currentMethod.bodyNode, methodRef, EdgeTypes.AST)
-              scope.addMethodRef(innerMethodNode.fullName, methodRef)
-            case _ =>
+          if (!isInClosure) {
+            scope.getMethodRef(innerMethodNode.fullName) match {
+              case None =>
+                diffGraph.addNode(methodRef)
+                diffGraph.addEdge(currentMethod.bodyNode, methodRef, EdgeTypes.AST)
+                scope.addMethodRef(innerMethodNode.fullName, methodRef)
+              case _ =>
+            }
           }
 
           val closureBindingId = if (innerMethodNode.fullName.contains(NamespaceTraversal.globalNamespaceName)) {
@@ -208,8 +209,7 @@ trait AstCreatorHelper(disableFileContent: Boolean)(implicit withSchemaValidatio
   private def createClosureBindingsForArrowClosure(expr: PhpNode, name: String): NewNode = {
     val surroundingIter    = scope.getSurroundingMethodsForArrowClosure.drop(1).iterator
     val surroundingMethods = scope.getSurroundingMethodsForArrowClosure.dropRight(1)
-    val localNodes         = mutable.ArrayBuffer[NewLocal]()
-    createClosureCaptureForNode(expr, name, surroundingIter, surroundingMethods)
+    createClosureCaptureForNode(expr, name, surroundingIter, surroundingMethods, isInClosure = true)
     scope.lookupVariable(name).get
   }
 
@@ -250,13 +250,13 @@ trait AstCreatorHelper(disableFileContent: Boolean)(implicit withSchemaValidatio
 
   protected def getMfn(call: PhpCallExpr, name: String): String = {
     lazy val default               = s"$UnresolvedNamespace$MethodDelimiter$name"
-    lazy val maybeResolvedFunction = scope.resolveIdentifier(name).filter(_.isInstanceOf[PhpFunction])
+    lazy val maybeResolvedFunction = scope.resolveFunctionIdentifier(name)
     call.target match {
       case Some(nameExpr: PhpNameExpr) if call.isStatic =>
         // Static method call with a simple receiver
         if (nameExpr.name == NameConstants.Self)
-          composeMethodFullNameForCall(name, appendMetaTypeDeclExt = !scope.isSurroundedByMetaclassTypeDecl)
-        else s"${nameExpr.name}$MetaTypeDeclExtension$MethodDelimiter$name"
+          composeMethodFullNameForCall(name)
+        else s"${nameExpr.name}$MethodDelimiter$name"
       case Some(_) =>
         // As soon as we have a dynamic component to the call, we can't truly define a method full name
         default
@@ -267,7 +267,7 @@ trait AstCreatorHelper(disableFileContent: Boolean)(implicit withSchemaValidatio
         name
       // Assume name-space local function call
       case None =>
-        composeMethodFullNameForCall(name, call.isStatic)
+        composeMethodFullNameForCall(name)
     }
   }
 

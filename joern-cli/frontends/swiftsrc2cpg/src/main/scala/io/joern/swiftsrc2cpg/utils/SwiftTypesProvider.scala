@@ -58,6 +58,7 @@ object SwiftTypesProvider {
     range: (Int, Int),
     typeFullname: Option[String],
     declFullname: Option[String],
+    inherits: Seq[String],
     nodeKind: String
   ) {
     override def equals(obj: Any): Boolean = obj match {
@@ -77,16 +78,23 @@ object SwiftTypesProvider {
     }
   }
 
-  /** Information about a Swift type found in the source code. fullName and tpe are demangled.
+  /** Information about a Swift type found in the source code. The provided fullNames are demangled.
     *
     * @param typeFullname
     *   The fully qualified type name (if any; demangled)
     * @param declFullname
-    *   The fully qualified decl name (if any; demangled)
+    *   The fully qualified declaration name (if any; demangled)
+    * @param inherits
+    *   A sequence of fully qualified inherited type names (if any; demangled)
     * @param nodeKind
-    *   The AST node kind
+    *   The AST node kind where this information was observed
     */
-  case class ResolvedTypeInfo(typeFullname: Option[String], declFullname: Option[String], nodeKind: String)
+  case class ResolvedTypeInfo(
+    typeFullname: Option[String],
+    declFullname: Option[String],
+    inherits: Seq[String],
+    nodeKind: String
+  )
 
   /**   - [[java.util.concurrent.ConcurrentHashMap]] provides atomic compute and computeIfAbsent operations used here to
     *     create-or-update entries and mutate the inner HashSet safely per key, without extra locks or retry loops.
@@ -98,7 +106,7 @@ object SwiftTypesProvider {
     *   - Keeps interop consistent with the rest of the JDK concurrency used here (executors, I/O), and plays well with
     *     `.asScala` when materializing immutable views.
     */
-  type MutableSwiftFileLocalTypeMapping =
+  private type MutableSwiftFileLocalTypeMapping =
     java.util.concurrent.ConcurrentHashMap[(Int, Int), mutable.HashSet[ResolvedTypeInfo]]
   type MutableSwiftTypeMapping =
     java.util.concurrent.ConcurrentHashMap[String, MutableSwiftFileLocalTypeMapping]
@@ -166,10 +174,13 @@ object SwiftTypesProvider {
   private val SwiftCompilerIgnoredArgs =
     Seq(
       "-v",
+      "-experimental-emit-module-separately",
+      "-explicit-module-build",
       "-output-file-map",
       "-incremental",
       "-whole-module-optimization",
       "-parseable-output",
+      "-use-frontend-parseable-output",
       "-serialize-diagnostics",
       "-Wwarning",
       "-warnings-as-errors"
@@ -372,7 +383,12 @@ object SwiftTypesProvider {
     @scala.annotation.tailrec
     def loop(remaining: List[String], result: List[String]): List[String] = {
       remaining match {
-        case Nil => result.reverse
+        case Nil                                              => result.reverse
+        case "--" :: tail                                     => loop(tail, result)
+        case "" :: tail                                       => loop(tail, result)
+        case "builtin-Swift-Compilation" :: tail              => loop(tail, result)
+        case "builtin-SwiftDriver" :: tail                    => loop(tail, result)
+        case "builtin-Swift-Compilation-Requirements" :: tail => loop(tail, result)
         case head :: tail if argShouldBeFiltered(head) =>
           val remainingArgs = if (tail.headOption.exists(!_.startsWith("-"))) {
             val nextFlagIdx = tail.indexWhere(_.startsWith("-"))
@@ -412,7 +428,7 @@ object SwiftTypesProvider {
     *   A list of individual arguments
     */
   private def argsFromLine(line: String): List[String] = {
-    line.replace("\\ -", " -").replace("/ -", " -").split(SwiftCompilerArgSplit).toList
+    line.replace("\\ -", " -").replace("/ -", " -").replace("\\=", "=").split(SwiftCompilerArgSplit).toList
   }
 
   /** Lists all readable directories under the given path.
@@ -514,19 +530,28 @@ case class SwiftTypesProvider(config: Config, parsedSwiftInvocations: Seq[Seq[St
     */
   private def demangle(mangledName: String): Option[String] = {
     if (mangledName.isEmpty) return None
+
+    // special handling for objc symbols
+    if (mangledName.contains("@objc")) {
+      // `c:@(C)M@` is used as module prefix for objc symbols
+      // `@objc(cs)` indicates that a type follows that is an objc class
+      // `(im)` indicates that an instance method follows
+      return Some(mangledName.stripPrefix("c:@M@").stripPrefix("c:@CM@").replace("@objc(cs)", ".").replace("(im)", "."))
+    }
+
     val strippedMangledName = mangledName.stripPrefix("$").replace("s:e:s:", "s:").replace(":", "")
     findInStdOut(swiftDemangleCommand :+ strippedMangledName).map(_.trim)
   }
 
-  /** Removes Swift modifiers from a fullname.
+  /** Removes Swift modifiers from a fullName.
     *
-    * This method removes any Swift declaration modifiers (like public, private, static) from the given fullname,
+    * This method removes any Swift declaration modifiers (like public, private, static) from the given fullName,
     * cleaning it up for display and analysis.
     *
     * @param fullName
-    *   The fullname potentially containing Swift modifiers
+    *   The fullName potentially containing Swift modifiers
     * @return
-    *   The cleaned fullname with modifiers removed
+    *   The cleaned fullName with modifiers removed
     */
   private def removeModifier(fullName: String): String = {
     SwiftDeclModifier.foldLeft(fullName) { (cur, repl) =>
@@ -536,7 +561,7 @@ case class SwiftTypesProvider(config: Config, parsedSwiftInvocations: Seq[Seq[St
     }
   }
 
-  /** Calculates a demangled type fullname from a mangled Swift type name.
+  /** Calculates a demangled type fullName from a mangled Swift type name.
     *
     * This method demangles the Swift type name, removes modifiers, strips generics, and removes spaces to create a
     * clean, fully qualified type name. Results are cached.
@@ -544,17 +569,10 @@ case class SwiftTypesProvider(config: Config, parsedSwiftInvocations: Seq[Seq[St
     * @param mangledName
     *   The mangled Swift type name
     * @return
-    *   Some(demangled type fullname) if successful, None otherwise
+    *   Some(demangled type fullName) if successful, None otherwise
     */
   private def calculateTypeFullname(mangledName: String): Option[String] = {
-    mangledNameCache.computeIfAbsent(
-      mangledName,
-      _ =>
-        demangle(mangledName)
-          .map(removeModifier)
-          .map(AstCreatorHelper.stripGenerics)
-          .map(_.replace(" ", "").stripSuffix(".Type"))
-    )
+    calculateDeclFullname(mangledName).map(_.stripSuffix(".Type"))
   }
 
   /** This regex is designed to clean up Swift demangled type names by extracting meaningful parts and removing internal
@@ -562,7 +580,6 @@ case class SwiftTypesProvider(config: Config, parsedSwiftInvocations: Seq[Seq[St
     *
     *   1. `([^(]+)` - Captures everything before the first opening parenthesis, Example:
     *      `SwiftHelloWorldLib.HelloWorld.`
-    *
     *   1. `\((.+)\sin\s_[^)]+\)` - Matches a pattern with internal identifier details:
     *      - `\(` - Literal opening parenthesis
     *      - `(.+)` - Captures the name inside parentheses (before "in _...")
@@ -574,13 +591,32 @@ case class SwiftTypesProvider(config: Config, parsedSwiftInvocations: Seq[Seq[St
     */
   private val MemberNameRegex: Regex = """([^(]+)\((.+)\sin\s_[^)]+\)(.*)""".r
 
-  /** Basically the same as with MemberNameRegex. But here for extension function fullnames.
+  /** Regex to match demangled initializer-like signatures that contain a `->` return type followed by an `(in ...)`
+    * clause and a member after a dot.
     *
-    * E.g., `(extension in FooExt)Foo.bar() -> Swift.String` becomes `FooExt.Foo.bar() -> Swift.String`.
+    * Example match (abstracted): `... ) -> Module.Type(in _ID...).memberRest`
+    *
+    * Capture groups:
+    *   1. `(.+)` — the module/type name before the `\(in` clause (e.g. `Module.Type`)
+    *   1. `(.+)` — the member or remainder after the final dot (e.g. `memberRest`)
+    *
+    * Structure breakdown:
+    *   - `.+\)` : any characters ending with a closing parenthesis (end of parameter list)
+    *   - `\s->\s` : literal arrow with surrounding spaces
+    *   - `(.+)\(in.+\)` : capture the module/type name that precedes the `(in ...)` clause
+    *   - `\.(.+)` : a dot followed by the captured member/signature tail
     */
-  private val ExtensionNameRegex: Regex = """\(extension\sin\s([^)]+)\):(.*)""".r
+  private val InitNameRegex: Regex = """.+\)\s->\s(.+)\(in.+\)\.(.+)""".r
 
-  /** Calculates a demangled declaration fullname from a mangled Swift declaration name.
+  /** Basically the same as with MemberNameRegex. But here for extension function fullNames.
+    *
+    * E.g., `(extension in FooExt):Foo.bar() -> Swift.String` becomes `FooExt.Foo.bar() -> Swift.String`.
+    */
+  private val ExtensionNameRegex: Regex = """^\(extension\sin\s([^)]+)\):(.*)""".r
+
+  private val ExtensionInSignatureRegex: Regex = """\(extension in ([^)]+)\):""".r
+
+  /** Calculates a demangled declaration fullName from a mangled Swift declaration name.
     *
     * This method demangles the Swift declaration name, applies special transformations for member names and extensions,
     * and cleans up the result by removing modifiers and spaces. Results are cached.
@@ -588,7 +624,7 @@ case class SwiftTypesProvider(config: Config, parsedSwiftInvocations: Seq[Seq[St
     * @param mangledName
     *   The mangled Swift declaration name
     * @return
-    *   Some(demangled declaration fullname) if successful, None otherwise
+    *   Some(demangled declaration fullName) if successful, None otherwise
     */
   private def calculateDeclFullname(mangledName: String): Option[String] = {
     mangledNameCache.computeIfAbsent(
@@ -596,26 +632,61 @@ case class SwiftTypesProvider(config: Config, parsedSwiftInvocations: Seq[Seq[St
       _ =>
         demangle(mangledName)
           .map {
-            case MemberNameRegex(parent, name, rest) => removeModifier(s"$parent$name$rest")
-            case ExtensionNameRegex(name, rest)      => removeModifier(s"$name$rest")
-            case other                               => removeModifier(other)
+            case ExtensionNameRegex(name, rest) =>
+              removeModifier(s"$name<extension>.${rest.stripPrefix(s"$name.")}")
+            case MemberNameRegex(parent, name, rest) =>
+              AstCreatorHelper.stripGenerics(removeModifier(s"$parent$name$rest"))
+            case InitNameRegex(name, rest) =>
+              AstCreatorHelper.stripGenerics(removeModifier(s"$name.$rest"))
+            case other =>
+              AstCreatorHelper.stripGenerics(removeModifier(other))
           }
-          .map(AstCreatorHelper.stripGenerics)
-          .map(_.replace(" ", ""))
+          .map { fullName =>
+            val withExtensionsFixed = replaceExtensionInSignature(fullName)
+            withExtensionsFixed.replace(" ", "")
+          }
     )
   }
 
-  /** Resolves a TypeInfo object to a ResolvedTypeInfo by demangling type and declaration fullnames.
+  /** Rewrites `(extension in X):` fragments that can appear inside demangled Swift signatures. Swift demangling may
+    * embed extension context qualifiers like: `(...(extension in FooExt):Foo.bar...)` This method normalizes those
+    * occurrences by replacing: `(extension in FooExt):Foo.` with `FooExt.Foo.`
+    *
+    * It repeatedly applies the rewrite until no such fragment remains, ensuring nested or multiple occurrences are
+    * handled.
+    *
+    * @param fullName
+    *   The demangled fullName that may contain extension qualifiers.
+    * @return
+    *   The normalized fullName with extension qualifiers rewritten.
+    */
+  @scala.annotation.tailrec
+  private[utils] final def replaceExtensionInSignature(fullName: String): String = {
+    ExtensionInSignatureRegex.findFirstMatchIn(fullName) match {
+      case Some(m) =>
+        val head     = m.before
+        val name     = m.group(1)
+        val tail     = m.after.toString
+        val rest     = tail.stripPrefix(s"$name.")
+        val replaced = s"$head$name.$rest"
+        replaceExtensionInSignature(replaced)
+      case None =>
+        fullName
+    }
+  }
+
+  /** Resolves a TypeInfo object to a ResolvedTypeInfo by demangling type and declaration fullNames.
     *
     * @param typeInfo
     *   The TypeInfo object to resolve
     * @return
-    *   A ResolvedTypeInfo object containing demangled fullnames
+    *   A ResolvedTypeInfo object containing demangled fullNames
     */
   private def resolve(typeInfo: TypeInfo): ResolvedTypeInfo = {
     val demangledTypeFullname = typeInfo.typeFullname.flatMap(calculateTypeFullname)
     val demangledDeclFullname = typeInfo.declFullname.flatMap(calculateDeclFullname)
-    ResolvedTypeInfo(demangledTypeFullname, demangledDeclFullname, typeInfo.nodeKind)
+    val demangledInherits     = typeInfo.inherits.flatMap(calculateTypeFullname)
+    ResolvedTypeInfo(demangledTypeFullname, demangledDeclFullname, demangledInherits, typeInfo.nodeKind)
   }
 
   /** Parses Swift compiler JSON output and adds type information to the provided type mapping.

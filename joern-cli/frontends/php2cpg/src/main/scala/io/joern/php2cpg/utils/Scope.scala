@@ -1,7 +1,7 @@
 package io.joern.php2cpg.utils
 
 import io.joern.php2cpg.astcreation.AstCreator.NameConstants
-import io.joern.php2cpg.parser.Domain.{MetaTypeDeclExtension, PhpExpr, PhpNode}
+import io.joern.php2cpg.parser.Domain.{PhpExpr, PhpNode}
 import io.joern.php2cpg.passes.SymbolSummaryPass.*
 import io.joern.x2cpg.Ast
 import io.joern.x2cpg.datastructures.{NamespaceLikeScope, ScopeElement, TypedScopeElement, Scope as X2CpgScope}
@@ -26,7 +26,6 @@ class Scope(summary: Map[String, Seq[SymbolSummary]] = Map.empty)
   private var tmpClassCounter                                         = 0
   private var importedSymbols                                         = Map.empty[String, SymbolSummary]
   private val methodRefsInAst                                         = mutable.HashMap[String, NewMethodRef]()
-  private val capturedVariableClosureBindings = mutable.ArrayBuffer[(NewLocal, NewClosureBinding)]()
 
   override def pushNewScope(scopeNode: TypedScopeElement): Unit = {
     val mappedNode = scopeNode match {
@@ -136,14 +135,6 @@ class Scope(summary: Map[String, Seq[SymbolSummary]] = Map.empty)
   def addMethodRef(methodRefName: String, methodRef: NewMethodRef): Unit = methodRefsInAst.put(methodRefName, methodRef)
   def getMethodRef(methodRefName: String): Option[NewMethodRef]          = methodRefsInAst.get(methodRefName)
 
-  def addClosureBinding(closureBinding: NewClosureBinding, localNode: NewLocal): Unit =
-    capturedVariableClosureBindings.addOne((localNode, closureBinding))
-  def getAndClearClosureBindings: List[(NewLocal, NewClosureBinding)] = {
-    val capturedClosureBindings = capturedVariableClosureBindings.toList
-    capturedVariableClosureBindings.clear()
-    capturedClosureBindings
-  }
-
   def addVariableToMethodScope(identifier: String, variable: NewNode, methodFullName: String): Option[MethodScope] = {
     stack.collectFirst {
       case el @ ScopeElement(methodScope: MethodScope, _) if methodScope.fullName == methodFullName =>
@@ -166,12 +157,6 @@ class Scope(summary: Map[String, Seq[SymbolSummary]] = Map.empty)
     anonymousMethods.clear()
     methods
   }
-
-  def isSurroundedByMetaclassTypeDecl: Boolean =
-    stack
-      .map(_.scopeNode)
-      .collectFirst { case TypeScope(td, _) => td }
-      .exists(_.name.endsWith(MetaTypeDeclExtension))
 
   def isSurroundedByArrowClosure: Boolean =
     stack.map(_.scopeNode).collectFirst { case nm: MethodScope if nm.isArrowFunc => nm }.isDefined
@@ -350,5 +335,17 @@ class Scope(summary: Map[String, Seq[SymbolSummary]] = Map.empty)
     */
   def resolveIdentifier(symbol: String): Option[SymbolSummary] = {
     importedSymbols.get(symbol)
+  }
+
+  def resolveClassIdentifier(symbol: String): Option[SymbolSummary] = {
+    resolveIdentifier(symbol).collect { case sym: PhpClass =>
+      sym
+    }
+  }
+
+  def resolveFunctionIdentifier(symbol: String): Option[SymbolSummary] = {
+    resolveIdentifier(symbol).collect { case sym: PhpFunction =>
+      sym
+    }
   }
 }
